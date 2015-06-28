@@ -32,10 +32,10 @@ def is_redirect(response):
 
 class URLCleaner:
     """Preprocess and clean Twitter and LinkedIn urls."""
-    def __init__(self, urls, max_connections=30, max_tasks=10,
+    def __init__(self, urls, max_connections=30, num_workers=1,
                  max_tries=4, qsize=100, *, loop=None):
         self.loop = loop or asyncio.get_event_loop()
-        self.max_tasks = max_tasks
+        self.num_workers = num_workers
         self.max_tries = max_tries
         self.q = Queue(maxsize=qsize, loop=self.loop)
         self.connector = aiohttp.TCPConnector(limit=max_connections, loop=loop)
@@ -54,6 +54,8 @@ class URLCleaner:
                                                       allow_redirects=False,
                                                       connector=self.connector,
                                                       loop=self.loop)
+                content = yield from response.read()
+                print(content)
                 if tries > 1:
                     logger.info('Try %r for %r success', tries, url)
                 break
@@ -97,16 +99,18 @@ class URLCleaner:
             yield from self.probe_url(url)
             self.q.task_done()
 
-
     @asyncio.coroutine
     def clean(self):
         """Run the cleaner until all finished."""
         workers = [asyncio.Task(self.work(), loop=self.loop)
-                   for _ in range(self.max_tasks)]
+                   for _ in range(self.num_workers)]
         self.t0 = time.time()
 
         for url in self.urls:
-            self.q.put(url)
+            try:
+                self.q.put_nowait(url)
+            except asyncio.QueueFull:
+                yield from self.q.join()
 
         yield from self.q.join()
 
@@ -115,17 +119,16 @@ class URLCleaner:
             w.cancel()
 
 
-
 if __name__ == '__main__':
 
     # with open('scoped_twitter_urls.txt') as f:
     def filereader():
         pass
-    loop = asyncio.get_event_loop()
-    urlcleaner = URLCleaner(urlreader=filereader(), loop=loop)
+    event_loop = asyncio.get_event_loop()
+    urlcleaner = URLCleaner(urls=filereader(), loop=event_loop)
 
     try:
-        loop.run_until_complete(urlcleaner)
+        event_loop.run_until_complete(urlcleaner)
     finally:
         urlcleaner.close()
-        loop.close()
+        event_loop.close()
