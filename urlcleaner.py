@@ -10,7 +10,6 @@ import aiohttp
 import logging
 import time
 import urllib
-from collections import namedtuple
 
 try:
     # Python <3.4.4.
@@ -23,7 +22,36 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-URLStat = namedtuple('URLStat', ['url', 'next_url', 'status', 'exception'])
+class InvalidAttribute(Exception):
+    pass
+
+
+class URLStat:
+
+    url = None
+    local_clean_url = None
+    remote_clean_url = None
+    status = 'UNCLEANED'
+    http_code = None
+    exception = None
+
+    def __init__(self, **kwargs):
+        _allowed_attrs = self._allowed_attrs()
+
+        for key, value in kwargs.items():
+            if key not in _allowed_attrs:
+                raise InvalidAttribute('Keyword argument %s is not allowed',
+                                       key)
+            setattr(self, key, value)
+
+    def _allowed_attrs(self):
+        return {key for key in self.__class__.__dict__.keys() if not
+                key.startswith('_')}
+
+    def __repr__(self):
+        params = ['{}={}'.format(key, repr(getattr(self, key))) for key in
+                  self._allowed_attrs()]
+        return 'URLStat({})'.format(', '.join(params))
 
 
 def is_redirect(response):
@@ -33,11 +61,13 @@ def is_redirect(response):
 class URLCleaner:
     """Preprocess and clean Twitter and LinkedIn urls."""
     def __init__(self, urls, max_connections=30, num_workers=1,
-                 max_tries=4, qsize=100, timeout=3, *, loop=None):
+                 max_tries=4, qsize=100, result_qsize=100, timeout=3, *,
+                 loop=None):
         self.loop = loop or asyncio.get_event_loop()
         self.num_workers = num_workers
         self.max_tries = max_tries
         self.q = Queue(maxsize=qsize, loop=self.loop)
+        self.result_q = Queue(maxsize=result_qsize, loop=self.loop)
         self.timeout = timeout
         self.connector = aiohttp.TCPConnector(limit=max_connections,
                                               loop=self.loop)
@@ -46,22 +76,31 @@ class URLCleaner:
         self.t0 = time.time()
         self.t1 = None
 
+    def local_clean(self, url):
+        local_clean_url = url
+        status = 'LOCAL_OK'
+        return URLStat(url=url, local_clean_url=local_clean_url,
+                       remote_clean_url=None, status=status, http_code=None,
+                       exception=None)
+
     @asyncio.coroutine
-    def probe_url(self, url):
+    def remote_clean(self, urlstat):
+        """Check URL by HEAD probing it."""
         tries = 0
         exception = None
+        url = urlstat.local_clean_url
         while tries < self.max_tries:
             try:
                 response = yield from asyncio.wait_for(
                     aiohttp.request('head', url, allow_redirects=False,
                                     connector=self.connector, loop=self.loop),
                     self.timeout, loop=self.loop)
-                yield from response.release()
                 response.close()
 
                 if tries > 1:
                     logger.info('Try %r for %r success', tries, url)
                 break
+
             except ValueError as client_error:
                 # do not need to retry for these errors
                 logger.info('Try %r for %r raised %s', tries, url,
@@ -78,41 +117,56 @@ class URLCleaner:
         else:
             # all tries failed
             logger.error('%r failed', url)
-            self.record_url_stat(URLStat(url=url, next_url=None, status=None,
-                                         exception=exception))
-            return
+            urlstat.status = 'REMOTE_ERROR'
+            urlstat.exception = exception
+            return urlstat
+
+        urlstat.http_code = response.status
 
         if is_redirect(response):
             location = response.headers['location']
-            next_url = urllib.parse.urljoin(url, location)
-            self.record_url_stat(URLStat(url=url, next_url=next_url,
-                                         status=response.status,
-                                         exception=None))
+            remote_clean_url = urllib.parse.urljoin(url, location)
+            urlstat.remote_clean_url = remote_clean_url
+        elif response.status == 200:
+            urlstat.status = 'REMOTE_OK'
         else:
-            self.record_url_stat(URLStat(url=url, next_url=None,
-                                         status=response.status,
-                                         exception=None))
-        return (response.status, url)
+            urlstat.status = 'REMOTE_INVALID'
+
+        return urlstat
+
+    @asyncio.coroutine
+    def process_url(self, url):
+        urlstat = self.local_clean(url)
+        if urlstat.local_clean_url:
+            urlstat = yield from self.remote_clean(urlstat)
+        return urlstat
 
     def close(self):
         """Close resources."""
         self.connector.close()
 
-    def record_url_stat(self, url_stat):
-        print(url_stat)
+    @asyncio.coroutine
+    def save_results(self):
+        """Process queue items forever."""
+        while True:
+            urlstat = yield from self.result_q.get()
+            print(urlstat)
+            self.result_q.task_done()
 
     @asyncio.coroutine
     def work(self):
         """Process queue items forever."""
         while True:
             url = yield from self.q.get()
-            yield from self.probe_url(url)
+            urlstat = yield from self.process_url(url)
             self.q.task_done()
+            self.result_q.put_nowait(urlstat)
 
     @asyncio.coroutine
     def clean(self):
         """Run the cleaner until all finished."""
         try:
+            consumer = asyncio.Task(self.save_results(), loop=self.loop)
             workers = [asyncio.Task(self.work(), loop=self.loop) for _ in
                        range(self.num_workers)]
             self.t0 = time.time()
@@ -124,10 +178,14 @@ class URLCleaner:
                     yield from self.q.join()
 
             yield from self.q.join()
+            yield from self.result_q.join()
 
             self.t1 = time.time()
+            logger.debug('Cleaning time %.2f seconds', self.t1 - self.t0)
+
             for w in workers:
                 w.cancel()
+            consumer.cancel()
         finally:
             self.close()
 
