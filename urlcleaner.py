@@ -1,4 +1,3 @@
-#!/usr/bin/env python3.4
 # coding: utf-8
 
 """Cleaner for Twitter and LinkedIn urls."""
@@ -59,7 +58,7 @@ def is_redirect(response):
 
 
 class URLCleaner:
-    """Preprocess and clean Twitter and LinkedIn urls."""
+    """Preprocess and clean urls."""
     def __init__(self, urls, max_connections=30, num_workers=1,
                  max_tries=4, qsize=100, result_qsize=100, timeout=3, *,
                  loop=None):
@@ -147,7 +146,7 @@ class URLCleaner:
 
     @asyncio.coroutine
     def save_results(self):
-        """Process queue items forever."""
+        """Save cleaned URLStat."""
         while True:
             urlstat = yield from self.result_q.get()
             print(urlstat)
@@ -185,20 +184,3 @@ class URLCleaner:
             consumer.cancel()
         finally:
             self.close()
-
-
-if __name__ == '__main__':
-
-    # with open('scoped_twitter_urls.txt') as f:
-    _urls = [
-        'https://twitter.com/anilkirbas',
-        'https://www.twitter.com/rsk_living',
-        'https://twitter.com/assaf',
-    ]
-    event_loop = asyncio.get_event_loop()
-    urlcleaner = URLCleaner(urls=_urls, loop=event_loop)
-
-    try:
-        event_loop.run_until_complete(urlcleaner.clean())
-    finally:
-        event_loop.close()
