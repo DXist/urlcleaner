@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 # coding: utf-8
 
 """Tests for urlcleaner"""
@@ -7,9 +8,7 @@ import asyncio
 import logging
 import os
 import unittest
-import urllib
 
-from aiohttp import test_utils
 from urlcleaner import URLCleaner
 
 
@@ -25,28 +24,28 @@ class TestURLCleaner(unittest.TestCase):
         urls = [
             'https://twitter.com/anilkirbas',
             'https://www.twitter.com/rsk_living',
-            'https://twitter.com/assaf'
+            'https://twitter.com/assaf',
+        ]
+        self.clean(urls)
+
+    def test_bad_data(self):
+        urls = [
+            '@anilkirbas',
+            'https://www.twitter.com/some_test_url',
+            'https://noname.noname',
+            'https://localhost:2',
+            None,
         ]
         self.clean(urls)
 
     def clean(self, urls, **kwargs):
-        with test_utils.run_server(self.loop) as httpd:
-            server_url = httpd.url()
-
-            if self.urlcleaner:
-                self.urlcleaner.close()
-
-            local_urls = [urllib.parse.urljoin(url, server_url) for url in
-                          urls]
-            self.urlcleaner = URLCleaner(local_urls, loop=self.loop, **kwargs)
-            self.addCleanup(self.urlcleaner.close)
-            self.loop.run_until_complete(self.urlcleaner.clean())
-            self.urlcleaner.close()
+        self.urlcleaner = URLCleaner(urls, loop=self.loop, **kwargs)
+        self.loop.run_until_complete(self.urlcleaner.clean())
 
 
 if __name__ == '__main__':
     os.environ.setdefault('PYTHONASYNCIODEBUG', '1')
-    if os.environ.get('LOGLEVEL') == 'DEBUG':
+    if os.environ.get('LOGLEVEL', 'DEBUG') == 'DEBUG':
         loglevel = logging.DEBUG
     else:
         loglevel = logging.INFO

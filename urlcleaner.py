@@ -33,12 +33,14 @@ def is_redirect(response):
 class URLCleaner:
     """Preprocess and clean Twitter and LinkedIn urls."""
     def __init__(self, urls, max_connections=30, num_workers=1,
-                 max_tries=4, qsize=100, *, loop=None):
+                 max_tries=4, qsize=100, timeout=3, *, loop=None):
         self.loop = loop or asyncio.get_event_loop()
         self.num_workers = num_workers
         self.max_tries = max_tries
         self.q = Queue(maxsize=qsize, loop=self.loop)
-        self.connector = aiohttp.TCPConnector(limit=max_connections, loop=loop)
+        self.timeout = timeout
+        self.connector = aiohttp.TCPConnector(limit=max_connections,
+                                              loop=self.loop)
         self.urls = urls
 
         self.t0 = time.time()
@@ -50,23 +52,32 @@ class URLCleaner:
         exception = None
         while tries < self.max_tries:
             try:
-                response = yield from aiohttp.request('head', url,
-                                                      allow_redirects=False,
-                                                      connector=self.connector,
-                                                      loop=self.loop)
-                content = yield from response.read()
-                print(content)
+                response = yield from asyncio.wait_for(
+                    aiohttp.request('head', url, allow_redirects=False,
+                                    connector=self.connector, loop=self.loop),
+                    self.timeout, loop=self.loop)
+                yield from response.release()
+                response.close()
+
                 if tries > 1:
                     logger.info('Try %r for %r success', tries, url)
                 break
+            except ValueError as client_error:
+                # do not need to retry for these errors
+                logger.info('Try %r for %r raised %s', tries, url,
+                            client_error)
+                tries = self.max_tries
+                exception = client_error
+
             except aiohttp.ClientError as client_error:
                 logger.info('Try %r for %r raised %s', tries, url,
                             client_error)
                 exception = client_error
+
             tries += 1
         else:
             # all tries failed
-            logger.error('%r failed after %r', url, self.max_tries)
+            logger.error('%r failed', url)
             self.record_url_stat(URLStat(url=url, next_url=None, status=None,
                                          exception=exception))
             return
@@ -81,7 +92,6 @@ class URLCleaner:
             self.record_url_stat(URLStat(url=url, next_url=None,
                                          status=response.status,
                                          exception=None))
-            response.close()
         return (response.status, url)
 
     def close(self):
@@ -102,33 +112,38 @@ class URLCleaner:
     @asyncio.coroutine
     def clean(self):
         """Run the cleaner until all finished."""
-        workers = [asyncio.Task(self.work(), loop=self.loop)
-                   for _ in range(self.num_workers)]
-        self.t0 = time.time()
+        try:
+            workers = [asyncio.Task(self.work(), loop=self.loop) for _ in
+                       range(self.num_workers)]
+            self.t0 = time.time()
 
-        for url in self.urls:
-            try:
-                self.q.put_nowait(url)
-            except asyncio.QueueFull:
-                yield from self.q.join()
+            for url in self.urls:
+                try:
+                    self.q.put_nowait(url)
+                except asyncio.QueueFull:
+                    yield from self.q.join()
 
-        yield from self.q.join()
+            yield from self.q.join()
 
-        self.t1 = time.time()
-        for w in workers:
-            w.cancel()
+            self.t1 = time.time()
+            for w in workers:
+                w.cancel()
+        finally:
+            self.close()
 
 
 if __name__ == '__main__':
 
     # with open('scoped_twitter_urls.txt') as f:
-    def filereader():
-        pass
+    _urls = [
+        'https://twitter.com/anilkirbas',
+        'https://www.twitter.com/rsk_living',
+        'https://twitter.com/assaf',
+    ]
     event_loop = asyncio.get_event_loop()
-    urlcleaner = URLCleaner(urls=filereader(), loop=event_loop)
+    urlcleaner = URLCleaner(urls=_urls, loop=event_loop)
 
     try:
-        event_loop.run_until_complete(urlcleaner)
+        event_loop.run_until_complete(urlcleaner.clean())
     finally:
-        urlcleaner.close()
         event_loop.close()
