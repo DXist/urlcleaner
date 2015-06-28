@@ -160,7 +160,7 @@ class URLCleaner:
             url = yield from self.q.get()
             urlstat = yield from self.process_url(url)
             self.q.task_done()
-            self.result_q.put_nowait(urlstat)
+            yield from self.result_q.put(urlstat)
 
     @asyncio.coroutine
     def clean(self):
@@ -172,10 +172,7 @@ class URLCleaner:
             self.t0 = time.time()
 
             for url in self.urls:
-                try:
-                    self.q.put_nowait(url)
-                except asyncio.QueueFull:
-                    yield from self.q.join()
+                yield from self.q.put(url)
 
             yield from self.q.join()
             yield from self.result_q.join()
