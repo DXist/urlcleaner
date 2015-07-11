@@ -71,15 +71,16 @@ def is_redirect(response):
 class URLCleaner:
     """Preprocess and clean urls."""
     def __init__(self, urls, normalizer, result_saver=print,
-                 qsize=100, result_qsize=100, num_workers=1,
+                 qsize=None, result_qsize=None, num_workers=1,
                  max_tries=4, timeout=3, max_connections=30, *, loop=None):
         self.urls = urls
         self.normalizer = normalizer
         self.result_saver = result_saver
 
         self.loop = loop or asyncio.get_event_loop()
-        self.q = Queue(maxsize=qsize, loop=self.loop)
-        self.result_q = Queue(maxsize=result_qsize, loop=self.loop)
+        self.q = Queue(maxsize=qsize or num_workers * 10, loop=self.loop)
+        self.result_q = Queue(maxsize=result_qsize or num_workers * 10,
+                              loop=self.loop)
 
         self.num_workers = num_workers
         self.max_tries = max_tries
@@ -89,6 +90,7 @@ class URLCleaner:
 
         self.t0 = time.time()
         self.t1 = None
+        self.clean_task = None
 
     def local_clean(self, url):
         local_clean_url = self.normalizer(url)
@@ -125,7 +127,7 @@ class URLCleaner:
                 tries = self.max_tries
                 exception = client_error
 
-            except aiohttp.ClientError as client_error:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as client_error:
                 logger.info('Try %r for %r raised %s', tries, url,
                             client_error)
                 exception = client_error
@@ -170,7 +172,10 @@ class URLCleaner:
             urlstat = yield from self.result_q.get()
             try:
                 self.result_saver(urlstat)
-            except Exception as e:
+            except StopIteration:
+                self.cancel()
+
+            except Exception as e: # noqa
                 logger.exception(e)
 
             self.result_q.task_done()
@@ -185,12 +190,11 @@ class URLCleaner:
             yield from self.result_q.put(urlstat)
 
     @asyncio.coroutine
-    def clean(self):
-        """Run the cleaner until all finished."""
+    def _clean(self):
         try:
-            consumer = asyncio.Task(self.save_results(), loop=self.loop)
-            workers = [asyncio.Task(self.work(), loop=self.loop) for _ in
-                       range(self.num_workers)]
+            self.consumer = asyncio.Task(self.save_results(), loop=self.loop)
+            self.workers = [asyncio.Task(self.work(), loop=self.loop) for _ in
+                            range(self.num_workers)]
             self.t0 = time.time()
 
             for url in self.urls:
@@ -201,21 +205,31 @@ class URLCleaner:
 
             self.t1 = time.time()
             logger.debug('Cleaning time %.2f seconds', self.t1 - self.t0)
+            self.cancel()
 
-            for w in workers:
-                w.cancel()
-            consumer.cancel()
         finally:
             self.close()
+
+    def clean(self):
+        """Run the cleaner until all finished."""
+        self.clean_task = asyncio.async(self._clean(), loop=self.loop)
+        return self.clean_task
+
+    def cancel(self):
+        self.consumer.cancel()
+        for w in self.workers:
+            w.cancel()
+
+        self.clean_task.cancel()
 
 
 def twitter_normalizer(url):
     scheme, netloc, path, _, _, fragment = urlparse(url)
-    if scheme not in ('http', 'https', ''):
+    if scheme.lower() not in ('http', 'https', ''):
         logger.debug('Invalid scheme %s, url %s', scheme, url)
         return None
 
-    if netloc not in ('twitter.com', 'www.twitter.com', ''):
+    if netloc.lower() not in ('twitter.com', 'www.twitter.com', ''):
         if netloc.startswith('@'):
             # we have url like http://@nickname
             nickname = netloc[1:]
