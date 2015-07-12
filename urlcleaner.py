@@ -10,7 +10,7 @@ import logging
 import re
 import time
 
-from urllib.parse import urlparse, urlunparse, urljoin
+from urllib.parse import urlparse, urlunparse
 
 try:
     # Python <3.4.4.
@@ -57,15 +57,14 @@ class URLStat:
     def __eq__(self, other):
         assert isinstance(other, URLStat)
         for attr in self._allowed_attrs():
-            if getattr(self, attr) != getattr(other, attr):
-                logger.debug('%s attribute is different', attr)
+            mine = getattr(self, attr)
+            their = getattr(other, attr)
+            if mine != their:
+                logger.debug(
+                    '%s attribute is different: %s != %s', attr, mine, their)
                 return False
 
         return True
-
-
-def is_redirect(response):
-    return response.status in (300, 301, 302, 303, 307)
 
 
 class URLCleaner:
@@ -73,6 +72,12 @@ class URLCleaner:
     def __init__(self, urls, normalizer, result_saver=print,
                  qsize=None, result_qsize=None, num_workers=1,
                  max_tries=4, timeout=3, max_connections=30, *, loop=None):
+        """Async URLCleaner.
+
+        :param normalizer: callable that takes url and returns normalized url
+        or False when url is invalid or None, when url can't be validated.
+
+        """
         self.urls = urls
         self.normalizer = normalizer
         self.result_saver = result_saver
@@ -96,8 +101,11 @@ class URLCleaner:
         local_clean_url = self.normalizer(url)
         if local_clean_url:
             status = 'LOCAL_OK'
-        else:
+        elif local_clean_url is False:
             status = 'LOCAL_INVALID'
+            local_clean_url = None
+        else:
+            status = 'UNCLEANED'
         return URLStat(url=url, local_clean_url=local_clean_url,
                        remote_clean_url=None, status=status, http_code=None,
                        exception=None)
@@ -111,7 +119,7 @@ class URLCleaner:
         while tries < self.max_tries:
             try:
                 response = yield from asyncio.wait_for(
-                    aiohttp.request('head', url, allow_redirects=False,
+                    aiohttp.request('head', url, allow_redirects=True,
                                     connector=self.connector, loop=self.loop),
                     self.timeout, loop=self.loop)
                 response.close()
@@ -127,10 +135,15 @@ class URLCleaner:
                 tries = self.max_tries
                 exception = client_error
 
-            except (aiohttp.ClientError, asyncio.TimeoutError) as client_error:
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
                 logger.info('Try %r for %r raised %s', tries, url,
-                            client_error)
-                exception = client_error
+                            error)
+                exception = error
+            except aiohttp.HttpProcessingError as e:
+                urlstat.http_code = e.code
+                urlstat.status = 'REMOTE_ERROR'
+                urlstat.exception = e
+                return urlstat
 
             tries += 1
         else:
@@ -142,19 +155,16 @@ class URLCleaner:
 
         urlstat.http_code = response.status
 
-        if is_redirect(response):
-            location = response.headers['location']
-            redirected_url = urljoin(url, location)
-            remote_clean_url = self.normalizer(redirected_url)
-
+        if response.status == 200:
+            remote_clean_url = self.normalizer(response.url)
             if remote_clean_url:
-                urlstat.remote_clean_url = remote_clean_url
                 urlstat.status = 'REMOTE_OK'
-            else:
+                urlstat.remote_clean_url = remote_clean_url
+            elif remote_clean_url is False:
                 urlstat.status = 'REMOTE_INVALID'
-        elif response.status == 200:
-            urlstat.status = 'REMOTE_OK'
-            urlstat.remote_clean_url = url
+            else:
+                # url requires authorization, can't clean
+                urlstat.status = 'UNCLEANED'
         else:
             urlstat.status = 'REMOTE_INVALID'
 
@@ -233,16 +243,14 @@ def twitter_normalizer(url):
     scheme, netloc, path, _, _, fragment = urlparse(url)
     if scheme.lower() not in ('http', 'https', ''):
         logger.debug('Invalid scheme %s, url %s', scheme, url)
-        return None
+        return False
+
+    if netloc in ('t.com', 'bit.ly'):
+        # can't process short urls locally
+        return url
 
     if netloc.lower() not in ('twitter.com', 'www.twitter.com', ''):
-        if netloc.startswith('@'):
-            # we have url like http://@nickname
-            nickname = netloc[1:]
-            return _twitter_url_from_nickname(nickname)
-        else:
-            logger.debug('Invalid netloc %s, url %s', netloc, url)
-            return None
+        return _url_for_unusual_twitter_loc(url, netloc, path)
 
     nickname = _nickname_from_path(path)
 
@@ -252,11 +260,85 @@ def twitter_normalizer(url):
 
     if fragment:
         # we have url like http://twitter.com/#!/nickname
-        if fragment.startswith('!/'):
-            nickname = fragment[2:]
+        fragment_nickname_match = re.match(r'!/?([\w\-\.%]+)', fragment)
+        if fragment_nickname_match:
+            nickname = fragment_nickname_match.group(1)
             return _twitter_url_from_nickname(nickname)
+        else:
+            logger.debug('Invalid fragment %s', fragment)
+            return False
 
-    logger.debug('Invalid fragment %s, url %s', fragment, url)
+    logger.debug('Invalid url %s', url)
+    return False
+
+
+def linkedin_normalizer(url): # noqa
+    scheme, netloc, path, _, _, fragment = urlparse(url)
+    if scheme.lower() not in ('http', 'https'):
+        logger.debug('Invalid scheme %s, url %s', scheme, url)
+        return False
+
+    if netloc in ('lnkd.in', 'bit.ly'):
+        # can't process short urls locally
+        return url
+
+    if not netloc.lower().endswith('linkedin.com'):
+        if netloc.startswith('@'):
+            # we have url like http://@nickname
+            nickname = netloc[1:]
+            return _linkedin_url_from_nickname(nickname)
+        else:
+            logger.debug('Invalid netloc %s, url %s', netloc, url)
+            return False
+
+    if re.match(r'(?:/profile/)', path):
+        # https://www.linkedin.com/profile/... urls require authentication
+        # won't clean it
+        return None
+
+    if re.match(r'(?:/pub/)?([\w\.%\-]+)', path):
+        # https://www.linkedin.com/pub/... urls should be cleaned remotely
+        # won't clean it
+        return urlunparse(
+            ('https', 'www.linkedin.com', path, '', '', ''))
+
+    path_nickname_match = re.match(
+        r'/(?:in/)?(?:@?([\w\.%\-]+))', path, re.ASCII)
+    nickname = path_nickname_match.group(1) if path_nickname_match else None
+
+    if nickname:
+        # we have url like https://www.linkedin.com/nickname
+        return _linkedin_url_from_nickname(nickname)
+    elif path != '/':
+        logger.debug('Invalid path %s', path)
+        return False
+
+    if fragment:
+        # we have url like http://linkedin.com/#!/nickname
+        fragment_nickname_match = re.match(r'!/?([\w\-\.%]+)', fragment)
+        if fragment_nickname_match:
+            nickname = fragment_nickname_match.group(1)
+            return _linkedin_url_from_nickname(nickname)
+        else:
+            logger.debug('Invalid fragment %s', fragment)
+            return False
+
+    logger.debug('Invalid url %s', url)
+    return False
+
+
+def _url_for_unusual_twitter_loc(url, netloc, path):
+    if netloc.startswith('@'):
+        # we have url like http://@nickname
+        nickname = netloc[1:]
+        return _twitter_url_from_nickname(nickname)
+    elif not path:
+        # we have url like http://nickname
+        nickname = netloc
+        return _twitter_url_from_nickname(nickname)
+    else:
+        logger.debug('Invalid netloc %s, url %s', netloc, url)
+        return False
 
 
 def _twitter_url_from_nickname(nickname):
@@ -265,7 +347,16 @@ def _twitter_url_from_nickname(nickname):
             ('https', 'twitter.com', nickname, '', '', ''))
     else:
         logger.debug('Invalid nickname %s', nickname)
-        return None
+        return False
+
+
+def _linkedin_url_from_nickname(nickname):
+    if re.fullmatch(r'[\w%\.-]+', nickname, re.ASCII):
+        return urlunparse(
+            ('https', 'www.linkedin.com', 'in/' + nickname, '', '', ''))
+    else:
+        logger.debug('Invalid nickname %s', nickname)
+        return False
 
 
 def _nickname_from_path(path):
@@ -275,7 +366,7 @@ def _nickname_from_path(path):
         nickname = path
 
     if nickname.startswith('@'):
-        # we have url like http://twitter.com/@nickname
+        # we have url like http://example.com/@nickname
         nickname = nickname[1:]
 
     return nickname

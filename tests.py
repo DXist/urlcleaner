@@ -9,7 +9,8 @@ import logging
 import os
 import unittest
 
-from urlcleaner import URLCleaner, URLStat, twitter_normalizer
+from urlcleaner import (URLCleaner, URLStat, twitter_normalizer,
+                        linkedin_normalizer)
 
 
 class TestURLCleaner(unittest.TestCase):
@@ -20,7 +21,7 @@ class TestURLCleaner(unittest.TestCase):
         self.addCleanup(self.loop.close)
         self.urlcleaner = None
 
-    def test_ok(self):
+    def test_twitter_ok(self):
         url_stat_apriori = {
             '@anilkirbas': URLStat(
                 url='@anilkirbas',
@@ -46,10 +47,26 @@ class TestURLCleaner(unittest.TestCase):
                 http_code=200,
                 exception=None
             ),
+            'http://VIACONT': URLStat(
+                url='http://VIACONT',
+                local_clean_url='https://twitter.com/VIACONT',
+                remote_clean_url='https://twitter.com/VIACONT',
+                status='REMOTE_OK',
+                http_code=200,
+                exception=None
+            ),
+            'http://bit.ly/18isnNg': URLStat(
+                url='http://bit.ly/18isnNg',
+                local_clean_url='http://bit.ly/18isnNg',
+                remote_clean_url='https://twitter.com/kangaroo5383',
+                status='REMOTE_OK',
+                http_code=200,
+                exception=None
+            ),
         }
         self.clean(url_stat_apriori, normalizer=twitter_normalizer)
 
-    def test_bad_data(self):
+    def test_twitter_not_ok(self):
         url_stat_apriori = {
             'https://www.twitter.com/some_test_url': URLStat(
                 url='https://www.twitter.com/some_test_url',
@@ -59,6 +76,7 @@ class TestURLCleaner(unittest.TestCase):
                 http_code=404,
                 exception=None
             ),
+            # account is suspended
             'http://twitter.com/#!/kWhOURS': URLStat(
                 url='http://twitter.com/#!/kWhOURS',
                 local_clean_url='https://twitter.com/kWhOURS',
@@ -94,6 +112,70 @@ class TestURLCleaner(unittest.TestCase):
         }
 
         self.clean(url_stat_apriori, normalizer=twitter_normalizer,)
+
+    def test_linkedin_ok(self):
+        url_stat_apriori = {
+            'http://ar.linkedin.com/in/ezequielcarlsson/': URLStat(
+                url='http://ar.linkedin.com/in/ezequielcarlsson/',
+                local_clean_url='https://www.linkedin.com/in/ezequielcarlsson',
+                remote_clean_url='https://www.linkedin.com/in/ezequielcarlsson',
+                status='REMOTE_OK',
+                http_code=200,
+                exception=None
+            ),
+            'http://@joaquingrech': URLStat(
+                url='http://@joaquingrech',
+                local_clean_url='https://www.linkedin.com/in/joaquingrech',
+                remote_clean_url='https://www.linkedin.com/in/joaquingrech',
+                status='REMOTE_OK',
+                http_code=200,
+                exception=None
+            ),
+            'http://www.linkedin.com/#!nikohrdy': URLStat(
+                url='http://www.linkedin.com/#!nikohrdy',
+                local_clean_url='https://www.linkedin.com/in/nikohrdy',
+                remote_clean_url='https://www.linkedin.com/in/nikohrdy',
+                status='REMOTE_OK',
+                http_code=200,
+                exception=None
+            ),
+            'https://www.linkedin.com/pub/elyse-ribbons-'
+            '%E6%9F%B3%E7%B4%A0%E8%8B%B1/4/467/a49': URLStat(
+                url='https://www.linkedin.com/pub/elyse-ribbons-'
+                '%E6%9F%B3%E7%B4%A0%E8%8B%B1/4/467/a49',
+                local_clean_url='https://www.linkedin.com/pub/elyse-ribbons-'
+                '%E6%9F%B3%E7%B4%A0%E8%8B%B1/4/467/a49',
+                remote_clean_url='https://www.linkedin.com/pub/elyse-ribbons-'
+                '%E6%9F%B3%E7%B4%A0%E8%8B%B1/4/467/a49',
+                status='REMOTE_OK',
+                http_code=200,
+                exception=None
+            ),
+            'http://www.linkedin.com/profile/view?id=85367361': URLStat(
+                url='http://www.linkedin.com/profile/view?id=85367361',
+                local_clean_url=None,
+                remote_clean_url=None,
+                status='UNCLEANED',
+                http_code=None,
+                exception=None
+            ),
+        }
+        self.clean(url_stat_apriori, normalizer=linkedin_normalizer)
+
+    def test_linkedin_not_ok(self):
+        url_stat_apriori = {
+            # account is suspended
+            'http://twitter.com/#!/kWhOURS': URLStat(
+                url='http://twitter.com/#!/kWhOURS',
+                local_clean_url='https://twitter.com/kWhOURS',
+                remote_clean_url=None,
+                status='REMOTE_INVALID',
+                http_code=302,
+                exception=None
+            ),
+        }
+
+        self.clean(url_stat_apriori, normalizer=linkedin_normalizer,)
 
     def clean(self, url_stat_apriori, normalizer, **kwargs):
         num_of_successes = 0

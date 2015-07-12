@@ -11,10 +11,16 @@ import sys
 
 from signal import signal, SIGPIPE, SIG_DFL
 
-from urlcleaner import URLCleaner, twitter_normalizer
+from urlcleaner import URLCleaner, twitter_normalizer, linkedin_normalizer
 
 logger = logging.getLogger(__name__)
 signal(SIGPIPE, SIG_DFL)
+
+
+normalizer_map = {
+    'twitter': twitter_normalizer,
+    'linkedin': linkedin_normalizer,
+}
 
 
 def ioreader(ioobj):
@@ -24,8 +30,6 @@ def ioreader(ioobj):
 
 
 def iowriter(ioobj):
-    """Write chunks to io object."""
-
     csvwriter = csv.writer(ioobj, delimiter='	')
     ioobj.write('	'.join(('url', 'status', 'local_clean_url',
                           'remote_clean_url', 'http_code', 'exception')))
@@ -46,6 +50,10 @@ if __name__ == '__main__':
     parser.add_argument('outfile', help='output file name', nargs='?',
                         type=argparse.FileType('w+', encoding='utf-8'),
                         default=sys.stdout)
+    parser.add_argument('-s', '--service',
+                        help='what service urls are cleaned for',
+                        type=str, choices=('twitter', 'linkedin'),
+                        default='twitter')
     parser.add_argument('-w', '--workers', help='number of workers',
                         type=int, default=10)
     parser.add_argument('-c', '--max-connections',
@@ -56,8 +64,8 @@ if __name__ == '__main__':
 
     arguments = parser.parse_args()
 
-    if arguments.verbose:
-        logging.basicConfig(level=logging.DEBUG)
+    loglevel = logging.DEBUG if arguments.verbose else logging.INFO
+    logging.basicConfig(level=loglevel)
 
     urls = ioreader(arguments.infile)
     w = iowriter(arguments.outfile)
@@ -68,7 +76,8 @@ if __name__ == '__main__':
 
     event_loop = asyncio.get_event_loop()
 
-    urlcleaner = URLCleaner(urls=urls, normalizer=twitter_normalizer,
+    urlcleaner = URLCleaner(urls=urls,
+                            normalizer=normalizer_map[arguments.service],
                             result_saver=result_saver,
                             max_connections=arguments.max_connections,
                             num_workers=arguments.workers, loop=event_loop)
@@ -76,7 +85,7 @@ if __name__ == '__main__':
     try:
         event_loop.run_until_complete(urlcleaner.clean())
     except KeyboardInterrupt:
-        print("Caught keyboard interrupt. Canceling tasks...")
+        logger.info("Caught keyboard interrupt. Canceling tasks...")
         urlcleaner.cancel()
         event_loop.run_forever()
     except asyncio.futures.CancelledError:
