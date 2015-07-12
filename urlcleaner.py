@@ -120,35 +120,38 @@ class URLCleaner:
             try:
                 response = yield from asyncio.wait_for(
                     aiohttp.request('head', url, allow_redirects=True,
+                                    headers={'Accept-Encoding': 'identity'},
                                     connector=self.connector, loop=self.loop),
                     self.timeout, loop=self.loop)
                 response.close()
+                response.release()
 
                 if tries > 1:
                     logger.info('Try %r for %r success', tries, url)
                 break
 
-            except ValueError as client_error:
+            except ValueError as error:
                 # do not need to retry for these errors
-                logger.info('Try %r for %r raised %s', tries, url,
-                            client_error)
+                logger.info('For %r raised %s', url, error)
                 tries = self.max_tries
-                exception = client_error
-
-            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-                logger.info('Try %r for %r raised %s', tries, url,
-                            error)
                 exception = error
+
             except aiohttp.HttpProcessingError as e:
+                logger.error('Got http error for %r, exception %s', url, e)
                 urlstat.http_code = e.code
                 urlstat.status = 'REMOTE_ERROR'
                 urlstat.exception = e
                 return urlstat
 
+            except (aiohttp.ClientError, asyncio.TimeoutError) as error:
+                logger.info('Try %r for %r raised %s', tries, url, error)
+                exception = error
+
             tries += 1
         else:
             # all tries failed
-            logger.error('%r failed', url)
+            logger.error('all tries for %r failed, exception %s', url,
+                         exception)
             urlstat.status = 'REMOTE_ERROR'
             urlstat.exception = exception
             return urlstat
