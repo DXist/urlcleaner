@@ -59,6 +59,14 @@ class TestURLCleaner(unittest.TestCase):
                 http_code=404,
                 exception=None
             ),
+            'http://twitter.com/#!/kWhOURS': URLStat(
+                url='http://twitter.com/#!/kWhOURS',
+                local_clean_url='https://twitter.com/kWhOURS',
+                remote_clean_url=None,
+                status='REMOTE_INVALID',
+                http_code=302,
+                exception=None
+            ),
             'https://noname.noname': URLStat(
                 url='https://noname.noname',
                 local_clean_url=None,

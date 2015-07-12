@@ -144,8 +144,14 @@ class URLCleaner:
 
         if is_redirect(response):
             location = response.headers['location']
-            remote_clean_url = urljoin(url, location)
-            urlstat.remote_clean_url = remote_clean_url
+            redirected_url = urljoin(url, location)
+            remote_clean_url = self.normalizer(redirected_url)
+
+            if remote_clean_url:
+                urlstat.remote_clean_url = remote_clean_url
+                urlstat.status = 'REMOTE_OK'
+            else:
+                urlstat.status = 'REMOTE_INVALID'
         elif response.status == 200:
             urlstat.status = 'REMOTE_OK'
             urlstat.remote_clean_url = url
