@@ -116,15 +116,17 @@ class URLCleaner:
         tries = 0
         exception = None
         url = urlstat.local_clean_url
+        headers = {
+            'Accept-Encoding': 'identity',
+        }
         while tries < self.max_tries:
             try:
                 response = yield from asyncio.wait_for(
                     aiohttp.request('head', url, allow_redirects=True,
-                                    headers={'Accept-Encoding': 'identity'},
+                                    headers=headers,
                                     connector=self.connector, loop=self.loop),
                     self.timeout, loop=self.loop)
                 response.close()
-                response.release()
 
                 if tries > 1:
                     logger.info('Try %r for %r success', tries, url)
@@ -144,10 +146,12 @@ class URLCleaner:
                 return urlstat
 
             except (aiohttp.ClientError, asyncio.TimeoutError) as error:
-                logger.info('Try %r for %r raised %s', tries, url, error)
+                logger.info('Try %r for %r raised %s, %s', tries, url,
+                            type(error), error)
                 exception = error
 
             tries += 1
+            yield from asyncio.sleep(0.1)
         else:
             # all tries failed
             logger.error('all tries for %r failed, exception %s', url,
@@ -242,7 +246,7 @@ class URLCleaner:
         self.clean_task.cancel()
 
 
-def twitter_normalizer(url):
+def twitter_normalizer(url): # noqa
     scheme, netloc, path, _, _, fragment = urlparse(url)
     if scheme.lower() not in ('http', 'https', ''):
         logger.debug('Invalid scheme %s, url %s', scheme, url)
