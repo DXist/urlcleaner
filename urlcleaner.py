@@ -7,6 +7,7 @@
 import asyncio
 import aiohttp
 import logging
+import os
 import re
 import time
 
@@ -90,8 +91,14 @@ class URLCleaner:
         self.num_workers = num_workers
         self.max_tries = max_tries
         self.timeout = timeout
-        self.connector = aiohttp.TCPConnector(limit=max_connections,
-                                              loop=self.loop)
+        proxy = os.environ.get('http_proxy')
+        if proxy:
+            self.connector = aiohttp.ProxyConnector(proxy=proxy,
+                                                    limit=max_connections,
+                                                    loop=self.loop)
+        else:
+            self.connector = aiohttp.TCPConnector(limit=max_connections,
+                                                  loop=self.loop)
 
         self.t0 = time.time()
         self.t1 = None
